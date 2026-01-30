@@ -77,15 +77,96 @@ const PAGES = [
 ];
 
 /**
+ * Extract mermaid diagrams from raw HTML by finding page-specific content
+ * @param {string} rawHTML - The raw HTML with JS disabled
+ * @param {string[]} headings - Array of H2 heading texts from rendered page (used as markers)
+ * @param {number} expectedCount - Number of mermaid SVGs found in rendered page
+ * @returns {string[]} Array of mermaid diagram source code
+ */
+function extractMermaidFromHTML(rawHTML, headings, expectedCount) {
+    if (expectedCount === 0) return [];
+
+    const diagrams = [];
+
+    // Find the first H2 heading in the markdown content (has ```mermaid nearby)
+    let contentStart = -1;
+    for (const heading of headings) {
+        // Find all occurrences of this heading
+        let searchStart = 0;
+        while (true) {
+            const idx = rawHTML.indexOf(heading, searchStart);
+            if (idx === -1) break;
+
+            // Check if this occurrence has mermaid code nearby (within 3000 chars)
+            const nearbyContent = rawHTML.substring(idx, idx + 3000);
+            if (nearbyContent.includes('```mermaid')) {
+                contentStart = idx;
+                break;
+            }
+            searchStart = idx + 1;
+        }
+        if (contentStart !== -1) break;
+    }
+
+    if (contentStart === -1) {
+        // Fallback: just take the first N mermaid blocks
+        const mermaidBlockPattern = /```mermaid\\n([\s\S]*?)\\n```/g;
+        let m;
+        while ((m = mermaidBlockPattern.exec(rawHTML)) !== null && diagrams.length < expectedCount) {
+            diagrams.push(unescapeMermaid(m[1]));
+        }
+        return diagrams;
+    }
+
+    // Find end of page content - look for section end or limit search
+    let contentEnd = rawHTML.length;
+    // Try to find the last heading marker to bound our search
+    const lastHeading = headings[headings.length - 1];
+    if (lastHeading) {
+        const lastIdx = rawHTML.indexOf(lastHeading, contentStart);
+        if (lastIdx !== -1) {
+            // Include content after last heading (add 5000 chars for final section)
+            contentEnd = Math.min(lastIdx + 5000, rawHTML.length);
+        }
+    }
+
+    // Extract mermaid blocks from this section
+    const section = rawHTML.substring(contentStart, contentEnd);
+    const mermaidBlockPattern = /```mermaid\\n([\s\S]*?)\\n```/g;
+    let m;
+    while ((m = mermaidBlockPattern.exec(section)) !== null && diagrams.length < expectedCount) {
+        diagrams.push(unescapeMermaid(m[1]));
+    }
+
+    return diagrams;
+}
+
+/**
+ * Unescape mermaid code from RSC payload
+ */
+function unescapeMermaid(code) {
+    return code
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '    ')
+        .replace(/\\"/g, '"')
+        .replace(/\\u003c/g, '<')
+        .replace(/\\u003e/g, '>')
+        .replace(/\u003c/g, '<')
+        .replace(/\u003e/g, '>')
+        .trim();
+}
+
+/**
  * Extract markdown content from a rendered DeepWiki page
  */
-async function extractMarkdown(page) {
-    return await page.evaluate(() => {
+async function extractMarkdown(page, mermaidDiagrams) {
+    const rawMarkdown = await page.evaluate(() => {
         // DeepWiki uses .prose class for main content
         const mainContent = document.querySelector('.prose');
         if (!mainContent) return '';
 
         const results = [];
+        let mermaidIndex = 0;
 
         function processNode(node, depth = 0) {
             if (!node) return;
@@ -107,8 +188,15 @@ async function extractMarkdown(page) {
             const className = el.className || '';
 
             // Skip unwanted elements
-            if (['script', 'style', 'nav', 'button', 'svg'].includes(tag)) return;
+            if (['script', 'style', 'nav', 'button'].includes(tag)) return;
             if (className.includes('sr-only')) return;
+
+            // Handle SVG - this is likely a rendered mermaid diagram
+            if (tag === 'svg') {
+                // Insert placeholder for mermaid diagram
+                results.push('\n%%MERMAID_PLACEHOLDER%%\n');
+                return;
+            }
 
             // Handle specific elements
             switch (tag) {
@@ -132,7 +220,12 @@ async function extractMarkdown(page) {
                     return;
 
                 case 'p':
-                    results.push(`\n${el.textContent.trim()}\n\n`);
+                    const text = el.textContent.trim();
+                    // Skip if it looks like mermaid CSS
+                    if (text.startsWith('#mermaid-') || text.includes('font-family:ui-sans-serif')) {
+                        return;
+                    }
+                    results.push(`\n${text}\n\n`);
                     return;
 
                 case 'pre':
@@ -148,7 +241,14 @@ async function extractMarkdown(page) {
                         lang = langMatch ? langMatch[1] : '';
                     }
 
-                    const codeText = codeEl?.textContent || el.textContent;
+                    let codeText = codeEl?.textContent || el.textContent;
+
+                    // Skip if it looks like rendered mermaid CSS
+                    if (codeText.includes('#mermaid-') && codeText.includes('font-family')) {
+                        results.push('\n%%MERMAID_PLACEHOLDER%%\n');
+                        return;
+                    }
+
                     results.push(`\n\`\`\`${lang}\n${codeText.trim()}\n\`\`\`\n\n`);
                     return;
 
@@ -230,7 +330,7 @@ async function extractMarkdown(page) {
                     if (['div', 'section', 'article', 'span', 'main'].includes(tag)) {
                         // Check for mermaid diagram container
                         if (className.includes('mermaid')) {
-                            results.push(`\n\`\`\`mermaid\n${el.textContent.trim()}\n\`\`\`\n\n`);
+                            results.push('\n%%MERMAID_PLACEHOLDER%%\n');
                             return;
                         }
                         // Process children
@@ -252,6 +352,9 @@ async function extractMarkdown(page) {
 
         return markdown.trim();
     });
+
+    // Return raw markdown with placeholders (replacement done in main loop)
+    return rawMarkdown;
 }
 
 /**
@@ -311,9 +414,6 @@ async function main() {
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-
     // Download each page
     let successCount = 0;
     for (let i = 0; i < PAGES.length; i++) {
@@ -324,16 +424,53 @@ async function main() {
         process.stdout.write(`[${i + 1}/${PAGES.length}] ${pageInfo.title}... `);
 
         try {
-            await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+            // First pass: Get rendered page to count mermaid SVGs and get headings
+            const renderedPage = await browser.newPage();
+            await renderedPage.setViewport({ width: 1280, height: 800 });
+            await renderedPage.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+            await renderedPage.waitForSelector('.prose', { timeout: 15000 });
+            await new Promise(r => setTimeout(r, 2000));
 
-            // Wait for .prose content to render
-            await page.waitForSelector('.prose', { timeout: 15000 });
+            // Get page info for mermaid extraction
+            const pageMetadata = await renderedPage.evaluate(() => {
+                const prose = document.querySelector('.prose');
+                if (!prose) return { svgCount: 0, headings: [] };
 
-            // Extra wait for mermaid diagrams to render
-            await new Promise(r => setTimeout(r, 3000));
+                const svgs = prose.querySelectorAll('svg[id^="mermaid-"]');
+                const headings = Array.from(prose.querySelectorAll('h2, h3'))
+                    .map(h => h.textContent.trim());
 
-            // Extract markdown
-            let markdown = await extractMarkdown(page);
+                return { svgCount: svgs.length, headings };
+            });
+
+            // Extract markdown content
+            let markdown = await extractMarkdown(renderedPage, []);
+            await renderedPage.close();
+
+            // Second pass: Get raw HTML to extract mermaid source code
+            let mermaidDiagrams = [];
+            if (pageMetadata.svgCount > 0) {
+                const rawPage = await browser.newPage();
+                await rawPage.setJavaScriptEnabled(false);
+                await rawPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                const rawHTML = await rawPage.content();
+                mermaidDiagrams = extractMermaidFromHTML(rawHTML, pageMetadata.headings, pageMetadata.svgCount);
+                await rawPage.close();
+
+                // Replace mermaid placeholders with extracted diagrams
+                let diagramIndex = 0;
+                while (markdown.includes('%%MERMAID_PLACEHOLDER%%') && diagramIndex < mermaidDiagrams.length) {
+                    markdown = markdown.replace('%%MERMAID_PLACEHOLDER%%',
+                        `\n\`\`\`mermaid\n${mermaidDiagrams[diagramIndex]}\n\`\`\`\n`);
+                    diagramIndex++;
+                }
+            }
+
+            // Remove any remaining placeholders
+            markdown = markdown.replace(/%%MERMAID_PLACEHOLDER%%/g, '');
+            // Clean up any mermaid CSS that leaked through
+            markdown = markdown.replace(/```\n#mermaid-[\s\S]*?```\n/g, '');
+            markdown = markdown.replace(/\n#mermaid-[^\n]+\n/g, '\n');
 
             if (!markdown || markdown.length < 100) {
                 throw new Error('Content too short or empty');
@@ -353,7 +490,8 @@ async function main() {
             // Save
             await fs.writeFile(outputFile, markdown, 'utf-8');
             successCount++;
-            console.log(`✓ (${Math.round(markdown.length / 1024)}KB)`);
+            const diagramCount = mermaidDiagrams.length;
+            console.log(`✓ (${Math.round(markdown.length / 1024)}KB, ${diagramCount} diagrams)`);
 
         } catch (error) {
             console.log(`✗ (${error.message})`);
