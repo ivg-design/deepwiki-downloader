@@ -1,0 +1,25 @@
+{
+  "name": "deepwiki-downloader",
+  "version": "1.0.0",
+  "description": "Download documentation from DeepWiki as local markdown with preserved mermaid diagrams",
+  "main": "download-with-puppeteer.js",
+  "bin": {
+    "deepwiki-download": "./download-with-puppeteer.js"
+  },
+  "scripts": {
+    "download": "node download-with-puppeteer.js"
+  },
+  "keywords": [
+    "deepwiki",
+    "documentation",
+    "markdown",
+    "scraper",
+    "mermaid",
+    "github"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
+}
