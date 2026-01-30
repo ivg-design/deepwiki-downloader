@@ -81,142 +81,185 @@ const PAGES = [
  */
 async function extractMarkdown(page) {
     return await page.evaluate(() => {
-        const content = [];
-
-        // Find the main content area
-        const mainContent = document.querySelector('article') ||
-                           document.querySelector('main') ||
-                           document.querySelector('[class*="content"]') ||
-                           document.body;
-
+        // DeepWiki uses .prose class for main content
+        const mainContent = document.querySelector('.prose');
         if (!mainContent) return '';
 
-        // Helper to convert element to markdown
-        function elementToMarkdown(el, depth = 0) {
-            if (!el || el.nodeType !== 1) return '';
+        const results = [];
 
+        function processNode(node, depth = 0) {
+            if (!node) return;
+
+            // Handle text nodes
+            if (node.nodeType === 3) {
+                const text = node.textContent;
+                if (text && text.trim()) {
+                    results.push(text);
+                }
+                return;
+            }
+
+            // Only process element nodes
+            if (node.nodeType !== 1) return;
+
+            const el = node;
             const tag = el.tagName.toLowerCase();
-            const text = el.textContent?.trim() || '';
-
-            // Skip navigation, headers, footers
-            if (['nav', 'header', 'footer', 'script', 'style'].includes(tag)) {
-                return '';
-            }
-
-            // Skip elements with specific classes
             const className = el.className || '';
-            if (className.includes('sidebar') || className.includes('nav') || className.includes('menu')) {
-                return '';
-            }
 
+            // Skip unwanted elements
+            if (['script', 'style', 'nav', 'button', 'svg'].includes(tag)) return;
+            if (className.includes('sr-only')) return;
+
+            // Handle specific elements
             switch (tag) {
-                case 'h1': return `# ${text}\n\n`;
-                case 'h2': return `## ${text}\n\n`;
-                case 'h3': return `### ${text}\n\n`;
-                case 'h4': return `#### ${text}\n\n`;
-                case 'h5': return `##### ${text}\n\n`;
-                case 'h6': return `###### ${text}\n\n`;
+                case 'h1':
+                    results.push(`\n# ${el.textContent.trim()}\n\n`);
+                    return;
+                case 'h2':
+                    results.push(`\n## ${el.textContent.trim()}\n\n`);
+                    return;
+                case 'h3':
+                    results.push(`\n### ${el.textContent.trim()}\n\n`);
+                    return;
+                case 'h4':
+                    results.push(`\n#### ${el.textContent.trim()}\n\n`);
+                    return;
+                case 'h5':
+                    results.push(`\n##### ${el.textContent.trim()}\n\n`);
+                    return;
+                case 'h6':
+                    results.push(`\n###### ${el.textContent.trim()}\n\n`);
+                    return;
 
                 case 'p':
-                    return text ? `${text}\n\n` : '';
+                    results.push(`\n${el.textContent.trim()}\n\n`);
+                    return;
 
                 case 'pre':
-                    const code = el.querySelector('code');
-                    const lang = code?.className?.match(/language-(\w+)/)?.[1] || '';
-                    const codeText = code?.textContent || el.textContent;
-                    return `\`\`\`${lang}\n${codeText}\n\`\`\`\n\n`;
+                    // Code block - check for mermaid
+                    const codeEl = el.querySelector('code');
+                    const codeClass = codeEl?.className || '';
+                    let lang = '';
+
+                    if (codeClass.includes('mermaid') || className.includes('mermaid')) {
+                        lang = 'mermaid';
+                    } else {
+                        const langMatch = codeClass.match(/language-(\w+)/);
+                        lang = langMatch ? langMatch[1] : '';
+                    }
+
+                    const codeText = codeEl?.textContent || el.textContent;
+                    results.push(`\n\`\`\`${lang}\n${codeText.trim()}\n\`\`\`\n\n`);
+                    return;
 
                 case 'code':
-                    // Inline code (not inside pre)
-                    if (el.parentElement?.tagName.toLowerCase() !== 'pre') {
-                        return `\`${text}\``;
-                    }
-                    return '';
+                    // Inline code (skip if parent is pre)
+                    if (el.parentElement?.tagName.toLowerCase() === 'pre') return;
+                    results.push(`\`${el.textContent}\``);
+                    return;
 
                 case 'ul':
-                case 'ol':
-                    let listMd = '';
-                    el.querySelectorAll(':scope > li').forEach((li, i) => {
-                        const prefix = tag === 'ol' ? `${i + 1}. ` : '- ';
-                        listMd += `${prefix}${li.textContent.trim()}\n`;
+                    results.push('\n');
+                    el.querySelectorAll(':scope > li').forEach(li => {
+                        results.push(`- ${li.textContent.trim()}\n`);
                     });
-                    return listMd + '\n';
+                    results.push('\n');
+                    return;
+
+                case 'ol':
+                    results.push('\n');
+                    el.querySelectorAll(':scope > li').forEach((li, i) => {
+                        results.push(`${i + 1}. ${li.textContent.trim()}\n`);
+                    });
+                    results.push('\n');
+                    return;
 
                 case 'table':
-                    let tableMd = '';
+                    results.push('\n');
                     const rows = el.querySelectorAll('tr');
                     rows.forEach((row, rowIndex) => {
                         const cells = row.querySelectorAll('th, td');
                         const rowContent = Array.from(cells).map(c => c.textContent.trim()).join(' | ');
-                        tableMd += `| ${rowContent} |\n`;
+                        results.push(`| ${rowContent} |\n`);
                         if (rowIndex === 0) {
-                            tableMd += '|' + Array.from(cells).map(() => '---').join('|') + '|\n';
+                            results.push('|' + Array.from(cells).map(() => '---').join('|') + '|\n');
                         }
                     });
-                    return tableMd + '\n';
+                    results.push('\n');
+                    return;
+
+                case 'blockquote':
+                    const lines = el.textContent.trim().split('\n');
+                    lines.forEach(line => {
+                        results.push(`> ${line.trim()}\n`);
+                    });
+                    results.push('\n');
+                    return;
 
                 case 'a':
                     const href = el.getAttribute('href') || '';
-                    return `[${text}](${href})`;
+                    results.push(`[${el.textContent.trim()}](${href})`);
+                    return;
 
                 case 'strong':
                 case 'b':
-                    return `**${text}**`;
+                    results.push(`**${el.textContent}**`);
+                    return;
 
                 case 'em':
                 case 'i':
-                    return `*${text}*`;
+                    results.push(`*${el.textContent}*`);
+                    return;
+
+                case 'hr':
+                    results.push('\n---\n\n');
+                    return;
+
+                case 'br':
+                    results.push('\n');
+                    return;
 
                 case 'img':
                     const src = el.getAttribute('src') || '';
                     const alt = el.getAttribute('alt') || 'image';
-                    return `![${alt}](${src})\n\n`;
-
-                case 'blockquote':
-                    return `> ${text}\n\n`;
-
-                case 'hr':
-                    return '---\n\n';
-
-                case 'br':
-                    return '\n';
-
-                case 'div':
-                case 'section':
-                case 'article':
-                    // Check for mermaid
-                    if (className.includes('mermaid') || el.querySelector('.mermaid')) {
-                        const mermaidCode = el.textContent.trim();
-                        return `\`\`\`mermaid\n${mermaidCode}\n\`\`\`\n\n`;
-                    }
-                    // Recursively process children
-                    let childMd = '';
-                    el.childNodes.forEach(child => {
-                        if (child.nodeType === 1) {
-                            childMd += elementToMarkdown(child, depth + 1);
-                        } else if (child.nodeType === 3) {
-                            const nodeText = child.textContent?.trim();
-                            if (nodeText) childMd += nodeText + ' ';
-                        }
-                    });
-                    return childMd;
+                    results.push(`\n![${alt}](${src})\n\n`);
+                    return;
 
                 default:
-                    // For unknown tags, just return text content
-                    return text ? text + ' ' : '';
+                    // For divs and other containers, process children
+                    if (['div', 'section', 'article', 'span', 'main'].includes(tag)) {
+                        // Check for mermaid diagram container
+                        if (className.includes('mermaid')) {
+                            results.push(`\n\`\`\`mermaid\n${el.textContent.trim()}\n\`\`\`\n\n`);
+                            return;
+                        }
+                        // Process children
+                        el.childNodes.forEach(child => processNode(child, depth + 1));
+                    }
             }
         }
 
-        return elementToMarkdown(mainContent);
+        processNode(mainContent);
+
+        // Clean up the result
+        let markdown = results.join('');
+
+        // Fix multiple newlines
+        markdown = markdown.replace(/\n{4,}/g, '\n\n\n');
+
+        // Fix spacing around headers
+        markdown = markdown.replace(/\n+(#{1,6})/g, '\n\n$1');
+
+        return markdown.trim();
     });
 }
 
 /**
  * Fix internal links to use relative markdown paths
  */
-function fixInternalLinks(markdown, currentPageId) {
+function fixInternalLinks(markdown, repo) {
     // Convert DeepWiki URLs to relative markdown links
-    const linkPattern = /\]\(https:\/\/deepwiki\.com\/rive-app\/rive-runtime\/([^)]+)\)/g;
+    const linkPattern = new RegExp(`\\]\\(https://deepwiki\\.com/${repo.replace('/', '\\/')}/([^)]+)\\)`, 'g');
     return markdown.replace(linkPattern, (match, pageId) => {
         return `](./${pageId}.md)`;
     });
@@ -225,16 +268,15 @@ function fixInternalLinks(markdown, currentPageId) {
 /**
  * Create index.md with table of contents
  */
-function createIndex() {
-    let md = `# Rive Runtime Documentation
+function createIndex(repo) {
+    let md = `# ${repo} Documentation
 
-> Exported from [DeepWiki](https://deepwiki.com/rive-app/rive-runtime)
+> Exported from [DeepWiki](https://deepwiki.com/${repo})
 
 ## Table of Contents
 
 `;
 
-    let currentSection = '';
     for (const page of PAGES) {
         const sectionNum = page.id.split('-')[0];
         const isMainSection = !sectionNum.includes('.');
@@ -247,7 +289,7 @@ function createIndex() {
 ---
 
 *This documentation was automatically exported from DeepWiki.*
-*Source: https://deepwiki.com/rive-app/rive-runtime*
+*Source: https://deepwiki.com/${repo}*
 `;
 
     return md;
@@ -282,14 +324,20 @@ async function main() {
         process.stdout.write(`[${i + 1}/${PAGES.length}] ${pageInfo.title}... `);
 
         try {
-            await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+            await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
 
-            // Wait for content to render
-            await page.waitForSelector('article, main, [class*="content"]', { timeout: 10000 });
-            await new Promise(r => setTimeout(r, 2000)); // Extra wait for mermaid
+            // Wait for .prose content to render
+            await page.waitForSelector('.prose', { timeout: 15000 });
+
+            // Extra wait for mermaid diagrams to render
+            await new Promise(r => setTimeout(r, 3000));
 
             // Extract markdown
             let markdown = await extractMarkdown(page);
+
+            if (!markdown || markdown.length < 100) {
+                throw new Error('Content too short or empty');
+            }
 
             // Add title if not present
             if (!markdown.startsWith('#')) {
@@ -297,7 +345,7 @@ async function main() {
             }
 
             // Fix internal links
-            markdown = fixInternalLinks(markdown, pageInfo.id);
+            markdown = fixInternalLinks(markdown, REPO);
 
             // Add source reference
             markdown += `\n\n---\n*Source: [DeepWiki](${url})*\n`;
@@ -305,7 +353,7 @@ async function main() {
             // Save
             await fs.writeFile(outputFile, markdown, 'utf-8');
             successCount++;
-            console.log('✓');
+            console.log(`✓ (${Math.round(markdown.length / 1024)}KB)`);
 
         } catch (error) {
             console.log(`✗ (${error.message})`);
@@ -316,7 +364,7 @@ async function main() {
     }
 
     // Create index
-    const indexContent = createIndex();
+    const indexContent = createIndex(REPO);
     await fs.writeFile(path.join(OUTPUT_DIR, 'index.md'), indexContent, 'utf-8');
     console.log('\n📋 Created index.md');
 
