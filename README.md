@@ -5,7 +5,7 @@ Download documentation from [DeepWiki](https://deepwiki.com) and save it as a lo
 ## Installation
 
 ```bash
-git clone https://github.com/ivg/deepwiki-downloader.git
+git clone https://github.com/ivg-design/deepwiki-downloader.git
 cd deepwiki-downloader
 npm install
 ```
